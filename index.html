@@ -2532,8 +2532,30 @@ const MICRO_LESSONS_BY_SUB = {
  }
 };
 
+const ML_VOICE_CFG_KEY = "customs_exam_116_ml_voice_v1";
 let mlTimer = null;
-let mlState = { sub: "prac", epIdx: 0, sceneIdx: 0, playing: false, voiceOn: true, rate: 1.1 };
+let mlState = { sub: "prac", epIdx: 0, sceneIdx: 0, playing: false, voiceOn: true, rate: 1.1, pitch: 1.0, voiceURI: "" };
+
+try {
+  const savedV = JSON.parse(localStorage.getItem(ML_VOICE_CFG_KEY) || "null");
+  if (savedV) {
+    if (typeof savedV.rate === "number") mlState.rate = savedV.rate;
+    if (typeof savedV.pitch === "number") mlState.pitch = savedV.pitch;
+    if (typeof savedV.voiceURI === "string") mlState.voiceURI = savedV.voiceURI;
+    if (typeof savedV.voiceOn === "boolean") mlState.voiceOn = savedV.voiceOn;
+  }
+} catch (e) {}
+
+function saveMlVoiceCfg() {
+  try {
+    localStorage.setItem(ML_VOICE_CFG_KEY, JSON.stringify({
+      rate: mlState.rate,
+      pitch: mlState.pitch,
+      voiceURI: mlState.voiceURI,
+      voiceOn: mlState.voiceOn
+    }));
+  } catch (e) {}
+}
 
 function getCurMlList() {
   return (MICRO_LESSONS_BY_SUB[mlState.sub] || MICRO_LESSONS_BY_SUB.prac).eps;
@@ -2546,13 +2568,51 @@ function stopMicroLessonAudio() {
   }
 }
 
-function pickZhTwVoice() {
-  if (!("speechSynthesis" in window)) return null;
+function getAvailableZhVoices() {
+  if (!("speechSynthesis" in window)) return [];
   const vs = window.speechSynthesis.getVoices() || [];
-  return vs.find(v => /zh[-_]TW/i.test(v.lang))
-      || vs.find(v => /zh[-_]Hant/i.test(v.lang))
-      || vs.find(v => /zh/i.test(v.lang))
-      || null;
+  const zh = vs.filter(v => /zh|cmn|chinese|taiwan|mandarin/i.test((v.lang || "") + " " + (v.name || "")));
+  const score = v => {
+    const s = (v.name || "") + " " + (v.lang || "");
+    let sc = 0;
+    if (/zh[-_]TW/i.test(v.lang || "")) sc += 50;
+    else if (/zh[-_]Hant/i.test(v.lang || "")) sc += 40;
+    if (/Natural|Online|Neural|Enhanced|Premium|Siri/i.test(s)) sc += 30;
+    if (/HsiaoChen|YunJhe|HsiaoYu|Mei-Jia|Google 國語/i.test(s)) sc += 20;
+    return sc;
+  };
+  return zh.sort((a, b) => score(b) - score(a));
+}
+
+function pickZhTwVoice() {
+  const list = getAvailableZhVoices();
+  if (mlState.voiceURI) {
+    const exact = list.find(v => v.voiceURI === mlState.voiceURI);
+    if (exact) return exact;
+  }
+  return list[0] || null;
+}
+
+if ("speechSynthesis" in window && typeof window.speechSynthesis.onvoiceschanged !== "undefined") {
+  window.speechSynthesis.onvoiceschanged = () => {
+    if (typeof state !== "undefined" && state.tab === "video") render();
+  };
+}
+
+function testMicroVoice() {
+  stopMicroLessonAudio();
+  mlState.playing = false;
+  if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+    toast("此瀏覽器不支援語音合成");
+    return;
+  }
+  const u = new SpeechSynthesisUtterance("哈囉！這是我目前的講解聲音跟聲調，聽起來順耳嗎？");
+  u.lang = "zh-TW";
+  u.rate = mlState.rate;
+  u.pitch = mlState.pitch;
+  const v = pickZhTwVoice();
+  if (v) u.voice = v;
+  window.speechSynthesis.speak(u);
 }
 
 function advanceMicroScene() {
@@ -2583,6 +2643,7 @@ function playCurrentMicroScene() {
       const u = new SpeechSynthesisUtterance(sc.narration);
       u.lang = "zh-TW";
       u.rate = mlState.rate;
+      u.pitch = mlState.pitch;
       const v = pickZhTwVoice();
       if (v) u.voice = v;
       let finished = false;
@@ -2612,6 +2673,8 @@ function renderMicroLessons(root) {
   if (mlState.sceneIdx >= ep.scenes.length) mlState.sceneIdx = 0;
   const sc = ep.scenes[mlState.sceneIdx];
   const totalSc = ep.scenes.length;
+  const zhVoices = getAvailableZhVoices();
+  const curVoice = pickZhTwVoice();
   const diagHtml = (sc.diagramId && typeof EXAM_DIAGRAMS !== "undefined" && EXAM_DIAGRAMS[sc.diagramId])
     ? `<div class="ml-diag-wrap">${EXAM_DIAGRAMS[sc.diagramId].svg}</div>`
     : "";
@@ -2622,13 +2685,34 @@ function renderMicroLessons(root) {
         <div><strong>🎬 全四科生活化白話微課（共 18 集・108 幕）</strong></div>
         <div class="group">
           <button class="btn ${mlState.voiceOn ? "btn-ok" : ""}" id="ml-voice">${mlState.voiceOn ? "🔊 語音說書：開" : "🔇 純字幕輪播"}</button>
-          <select id="ml-rate" title="播放語速">
-            <option value="1" ${mlState.rate===1?"selected":""}>語速 1.0x</option>
-            <option value="1.1" ${mlState.rate===1.1?"selected":""}>語速 1.1x（自然聊天）</option>
-            <option value="1.25" ${mlState.rate===1.25?"selected":""}>語速 1.25x</option>
-            <option value="1.45" ${mlState.rate===1.45?"selected":""}>語速 1.45x（衝刺）</option>
-          </select>
+          <button class="btn" id="ml-test-v" title="試聽目前聲音與聲調">🎧 試聽</button>
         </div>
+      </div>
+      <div class="group" style="gap:8px;">
+        <span style="font-size:0.78rem;font-weight:700;color:var(--muted);">🎙️ 聲音調校：</span>
+        <select id="ml-speaker" title="選擇講者聲音" style="max-width:260px;">
+          ${zhVoices.length === 0
+            ? `<option value="">系統預設中文語音</option>`
+            : zhVoices.map(v => {
+                const selected = curVoice && curVoice.voiceURI === v.voiceURI;
+                const shortName = v.name.replace(/^Microsoft\s+/i, "").replace(/\s*-\s*Chinese.*$/i, "");
+                return `<option value="${escHtml(v.voiceURI)}" ${selected?"selected":""}>${escHtml(shortName)} (${escHtml(v.lang)})</option>`;
+              }).join("")}
+        </select>
+        <select id="ml-pitch" title="調整講解聲調（音高）">
+          <option value="0.82" ${mlState.pitch===0.82?"selected":""}>🎵 聲調：沉穩低音 (0.82)</option>
+          <option value="0.93" ${mlState.pitch===0.93?"selected":""}>🎵 聲調：溫和自然 (0.93)</option>
+          <option value="1" ${mlState.pitch===1?"selected":""}>🎵 聲調：標準 (1.0)</option>
+          <option value="1.12" ${mlState.pitch===1.12?"selected":""}>🎵 聲調：輕快活潑 (1.12)</option>
+          <option value="1.25" ${mlState.pitch===1.25?"selected":""}>🎵 聲調：清亮高音 (1.25)</option>
+        </select>
+        <select id="ml-rate" title="播放語速">
+          <option value="0.95" ${mlState.rate===0.95?"selected":""}>⚡ 語速 0.95x（慢速）</option>
+          <option value="1" ${mlState.rate===1?"selected":""}>⚡ 語速 1.0x</option>
+          <option value="1.1" ${mlState.rate===1.1?"selected":""}>⚡ 語速 1.1x（自然聊天）</option>
+          <option value="1.25" ${mlState.rate===1.25?"selected":""}>⚡ 語速 1.25x</option>
+          <option value="1.45" ${mlState.rate===1.45?"selected":""}>⚡ 語速 1.45x（衝刺）</option>
+        </select>
       </div>
       <div class="group">
         <span style="font-size:0.78rem;font-weight:700;color:var(--primary);">選擇科目：</span>
@@ -2684,7 +2768,7 @@ function renderMicroLessons(root) {
     </div>
 
     <div style="margin-top:12px;font-size:0.83rem;color:var(--muted);">
-      💡 <strong>小提醒</strong>：iPhone Safari 首次播放語音需手動點一次「▶ 播放本集」啟動系統語音；想要下載真人雙人對話 MP4／Podcast，也可用資料夾裡的 <code>NotebookLM_全四科影音包/</code> 3 分鐘生成！
+      💡 <strong>讓聲音變真人級的小技巧</strong>：電腦用 <strong>Microsoft Edge</strong> 開啟時，上方講者選 <code>HsiaoChen Online (Natural)</code> 或 <code>YunJhe Online (Natural)</code> 最接近真人主播！iPhone 可到「設定 → 輔助使用 → 語音內容 → 聲音 → 中文(台灣)」免費下載「美佳（增強版）」。想要雙人自然聊天室影片／MP4，可用 <code>NotebookLM_全四科影音包/</code> 3 分鐘生成！
     </div>
   `;
 
@@ -2716,11 +2800,26 @@ function renderMicroLessons(root) {
   });
   document.getElementById("ml-voice").onclick = () => {
     mlState.voiceOn = !mlState.voiceOn;
+    saveMlVoiceCfg();
     render();
     if (mlState.playing) playCurrentMicroScene();
   };
+  document.getElementById("ml-test-v").onclick = testMicroVoice;
+  document.getElementById("ml-speaker").onchange = e => {
+    mlState.voiceURI = e.target.value;
+    saveMlVoiceCfg();
+    if (mlState.playing) playCurrentMicroScene();
+    else testMicroVoice();
+  };
+  document.getElementById("ml-pitch").onchange = e => {
+    mlState.pitch = Number(e.target.value);
+    saveMlVoiceCfg();
+    if (mlState.playing) playCurrentMicroScene();
+    else testMicroVoice();
+  };
   document.getElementById("ml-rate").onchange = e => {
     mlState.rate = Number(e.target.value);
+    saveMlVoiceCfg();
     if (mlState.playing) playCurrentMicroScene();
   };
   document.getElementById("ml-play").onclick = () => {
